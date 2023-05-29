@@ -32,7 +32,7 @@ from pathlib import Path
 import datasets
 import json
 import torch
-from build_dataset import buid_instruction_dataset, DataCollatorForSupervisedDataset
+from build_dataset import buid_instruction_dataset, DataCollatorForSupervisedDataset, buid_multi_turn_chat_dataset
 import transformers
 from transformers import (
     CONFIG_MAPPING,
@@ -182,6 +182,11 @@ class DataTrainingArguments:
 
     max_seq_length: Optional[int] = field(default=512)
 
+    is_multi_turn_chat: bool = field(
+        default=False, metadata={"help": "Whether the files in dataset_dir are multi-turn chats or not. " +
+                                         "If True file names must end with .txt suffix."}
+    )
+
 @dataclass
 class MyTrainingArguments(TrainingArguments):
     trainable : Optional[str] = field(default="q_proj,v_proj")
@@ -292,18 +297,29 @@ def main():
     eval_dataset=None
     train_dataset = None
 
-
     if training_args.do_train:
-        with training_args.main_process_first(desc="loading and tokenization"):
-            path = Path(data_args.dataset_dir)
-            files = [os.path.join(path,file.name) for file in path.glob("*.json")]
-            logger.info(f"training files: {' '.join(files)}")
-            train_dataset = buid_instruction_dataset(
-                data_path=files, 
-                tokenizer=tokenizer, 
-                max_seq_length=data_args.max_seq_length,
-                data_cache_dir = None, 
-                preprocessing_num_workers = data_args.preprocessing_num_workers)
+        if training_args.is_multi_turn_chat:
+            with training_args.main_process_first(desc="loading and tokenization"):
+                path = Path(data_args.dataset_dir)
+                files = [os.path.join(path,file.name) for file in path.glob("*.txt")]
+                logger.info(f"training multi-turn chat files: {' '.join(files)}")
+                train_dataset = buid_multi_turn_chat_dataset(
+                    data_path=files,
+                    tokenizer=tokenizer,
+                    max_seq_length=data_args.max_seq_length,
+                    data_cache_dir=None,
+                    preprocessing_num_workers=data_args.preprocessing_num_workers)
+        else:
+            with training_args.main_process_first(desc="loading and tokenization"):
+                path = Path(data_args.dataset_dir)
+                files = [os.path.join(path,file.name) for file in path.glob("*.json")]
+                logger.info(f"training files: {' '.join(files)}")
+                train_dataset = buid_instruction_dataset(
+                    data_path=files,
+                    tokenizer=tokenizer,
+                    max_seq_length=data_args.max_seq_length,
+                    data_cache_dir = None,
+                    preprocessing_num_workers = data_args.preprocessing_num_workers)
         logger.info(f"Num train_samples  {len(train_dataset)}")
         logger.info("training example:")
         logger.info(tokenizer.decode(train_dataset[0]['input_ids']))

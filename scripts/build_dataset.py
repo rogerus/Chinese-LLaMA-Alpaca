@@ -1,14 +1,13 @@
+import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Dict, Sequence, Union, List
+from typing import Dict, Sequence, Union, List
+
 import datasets
 import torch
-import logging
-from datasets import load_dataset, concatenate_datasets
-import copy
 import transformers
-import random
+from datasets import load_dataset, concatenate_datasets, DatasetDict
 
 IGNORE_INDEX = -100
 
@@ -20,31 +19,63 @@ PROMPT_TEMPLATE = (
         "### Instruction:\n{instruction}\n\n### Response: "
     )
 
+
+class Prompter(object):
+    __slots__ = ("template", "_verbose")
+
+    def __init__(self, template_name: str = "", verbose: bool = False):
+        self._verbose = verbose
+        if not template_name:
+            template_name = 'multi_turn'
+        # by default template files are stored in ${PROJECT_ROOT}/scripts/templates/
+        file_name = f"./templates/{template_name}.json"
+        if not os.path.exists(file_name):
+            raise ValueError(f"Template file {file_name} not exists.")
+        with open(file_name) as f:
+            self.template = json.load(f)
+        if self._verbose:
+            print(f"Loaded prompt template {file_name} :\n{self.template['description']}")
+
+    def generate_prompt(self, instruction:str, input: Union[None, str] = None, label: Union[None, str] = None) -> str:
+        if input:
+            res = self.template["prompt_input"].format(instruction=instruction, input=input)
+        else:
+            res = self.template["prompt_no_input"].format(instruction=instruction)
+        if label:
+            res = f"{res}{label}"
+        if self._verbose:
+            print(res)
+        return res
+
+    def get_response(self, output: str) -> str:
+        return output.split(self.template["response_split"])[1].strip()
+
+
 def buid_multi_turn_chat_dataset(data_path: Union[List[str],str],
                 tokenizer: transformers.PreTrainedTokenizer,
                 max_seq_length: int, data_cache_dir = None,
                 preprocessing_num_workers = None,
                 ):
-
     def tokenization(examples):
         sources = []
         targets = []
-        prompt = PROMPT_TEMPLATE
-        for instruction, input, output in zip(examples['instruction'],examples['input'],examples['output']):
-            if input is not None and input !="":
+        prompter = Prompter("multi_turn")
+        for instruction, input, output in zip(examples['instruction'], examples['input'], examples['output']):
+            if input is not None and input != "":
                 instruction = instruction+'\n'+input
-            source = prompt.format_map({'instruction':instruction})
+            # source = prompt.format_map({'instruction': instruction})
+            source = prompter.generate_prompt(instruction=instruction, input=None, label=None)
             target = f"{output}{tokenizer.eos_token}"
 
             sources.append(source)
             targets.append(target)
 
-        tokenized_sources = tokenizer(sources,return_attention_mask=False)
-        tokenized_targets = tokenizer(targets,return_attention_mask=False,add_special_tokens=False)
+        tokenized_sources = tokenizer(sources, return_attention_mask=False)
+        tokenized_targets = tokenizer(targets, return_attention_mask=False, add_special_tokens=False)
 
         all_input_ids = []
         all_labels = []
-        for s,t in zip(tokenized_sources['input_ids'],tokenized_targets['input_ids']):
+        for s, t in zip(tokenized_sources['input_ids'], tokenized_targets['input_ids']):
             input_ids = torch.LongTensor(s + t)[:max_seq_length]
             labels = torch.LongTensor([IGNORE_INDEX] * len(s) + t)[:max_seq_length]
             assert len(input_ids) == len(labels)
@@ -53,7 +84,6 @@ def buid_multi_turn_chat_dataset(data_path: Union[List[str],str],
 
         results = {'input_ids':all_input_ids, 'labels': all_labels}
         return results
-
 
     logging.warning("building dataset...")
     all_datasets = []
@@ -64,13 +94,14 @@ def buid_multi_turn_chat_dataset(data_path: Union[List[str],str],
 
         if data_cache_dir is None:
             data_cache_dir = str(os.path.dirname(file))
-        cache_path = os.path.join(data_cache_dir,os.path.basename(file).split('.')[0])
+        cache_path = os.path.join(data_cache_dir, os.path.basename(file).split('.')[0])
         os.makedirs(cache_path, exist_ok=True)
         try:
             processed_dataset = datasets.load_from_disk(cache_path)
             logger.info(f'training datasets-{file} has been loaded from disk')
         except Exception:
-            raw_dataset = load_dataset("json", data_files=file, cache_dir=cache_path)
+            # raw_dataset = load_dataset("json", data_files=file, cache_dir=cache_path)
+            raw_dataset = DatasetDict.from_json({"train": data_path}, cache_dir=cache_path)
             tokenization_func = tokenization
             tokenized_dataset = raw_dataset.map(
                 tokenization_func,
